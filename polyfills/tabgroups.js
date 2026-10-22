@@ -104,10 +104,12 @@
   patch(tg, "move", async (groupId) => tg.get(groupId));
 
   // Synchronous join for sidepanel-polyfill.js, which must retarget a message
-  // before the extension's own listener sees it. Returns false if the group
-  // isn't known (yet).
+  // before the extension's own listener sees it. A long-lived panel can
+  // outlive its group (it is pruned when its last tab closes), so recreate it
+  // under the same id. Returns false for a missing or invalid group id.
   globalThis.__arcJoinTabGroup = (tabId, groupId) => {
-    if (!state.groups[groupId]) return false;
+    if (!Number.isInteger(groupId) || groupId < 0) return false;
+    state.groups[groupId] ??= { id: groupId, windowId: NONE, title: "Claude", color: "orange", collapsed: false };
     if (state.members[tabId] !== groupId) {
       state.members[tabId] = groupId;
       prune();

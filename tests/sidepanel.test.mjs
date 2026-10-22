@@ -2,7 +2,7 @@ import fs from 'fs'; import assert from 'assert';
 const mkEvent=()=>{const ls=new Set();return{ls,addListener(f){ls.add(f)},removeListener(f){ls.delete(f)},hasListener(f){return ls.has(f)}}};
 const onMessage=mkEvent(), onConnect=mkEvent(), onMessageExternal=mkEvent();
 globalThis.chrome={storage:{session:{get:async()=>({}),set:async()=>{}}},runtime:{id:'EXT',getURL:p=>'chrome-extension://EXT/'+p,ContextType:{},getContexts:async()=>[],onMessage,onConnect,onMessageExternal},
-  windows:{onRemoved:{addListener(){}},update:async()=>{}},sidePanel:{open(){}},
+  windows:{onRemoved:{addListener(){}},onFocusChanged:mkEvent(),get:async id=>({id,width:3500}),update:async()=>{}},sidePanel:{open(){}},
   tabs:{all:[{id:5,windowId:1,index:2,url:'https://site.com'}],get:async id=>chrome.tabs.all.find(t=>t.id===id),query:async()=>chrome.tabs.all,
     created:[],updated:[],onActivated:mkEvent(),onRemoved:mkEvent(),create:async o=>{const t={id:99,windowId:o.windowId,index:o.index,url:o.url};chrome.tabs.created.push(o);chrome.tabs.all.push(t);return t},update:async(id,o)=>{chrome.tabs.updated.push(id)}}};
 eval(fs.readFileSync(process.argv[2],'utf8'));

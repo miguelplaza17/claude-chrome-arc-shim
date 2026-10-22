@@ -1,5 +1,6 @@
 source/
 claude-arc/
-claude-arc.building/
+claude-crest/
+*.building/
 logs/
 .DS_Store

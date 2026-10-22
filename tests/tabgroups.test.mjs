@@ -19,4 +19,8 @@ assert.equal((await c.tabGroups.query({title:'Claude'})).length,1);
 await c.tabs.ungroup([1]); await onRemoved[0](2);
 assert.equal((await c.tabGroups.query({})).length,0);
 await assert.rejects(c.tabGroups.get(g));
+// a panel can outlive its group: joining recreates it under the same id
+assert.equal(globalThis.__arcJoinTabGroup(3,g),true);
+assert.equal((await c.tabGroups.get(g)).title,'Claude'); assert.equal((await c.tabs.get(3)).groupId,g);
+assert.equal(globalThis.__arcJoinTabGroup(3,-1),false);
 console.log('ALL PASS, persisted:',JSON.stringify(store));

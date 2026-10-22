@@ -1,10 +1,11 @@
 import fs from 'fs'; import assert from 'assert';
 const tick=()=>new Promise(r=>setTimeout(r,5));
 const mkEvent=()=>{const ls=new Set();return{ls,addListener(f){ls.add(f)}}};
-const tabs={5:{id:5,windowId:1,title:'Extensions',url:'chrome://extensions/'},6:{id:6,windowId:1,title:'Cloudflare DNS',url:'https://dash.cloudflare.com/x?token=secret#h'},7:{id:7,windowId:2,title:'Other window',url:'https://x.com'}};
-let session={}; const storageChanged=mkEvent(), tabUpdated=mkEvent();
+const tabs={8:{id:8,windowId:1,title:'MBL TV',url:'https://youtube.com/@TVdoMBL?si=x'},5:{id:5,windowId:1,title:'Extensions',url:'chrome://extensions/'},6:{id:6,windowId:1,title:'Cloudflare DNS',url:'https://dash.cloudflare.com/x?token=secret#h'},7:{id:7,windowId:2,title:'Other window',url:'https://x.com'}};
+let session={}; const sentToWorker=[]; const storageChanged=mkEvent(), tabUpdated=mkEvent();
 globalThis.location={search:'?tabId=5'};
 globalThis.chrome={storage:{session:{get:async k=>({[k]:session[k]})},onChanged:storageChanged},
+  runtime:{getURL:p=>'chrome-extension://EXT/'+p,sendMessage:async m=>(sentToWorker.push(m),{ok:true})},windows:{getCurrent:async()=>({id:1})},
   tabs:{getCurrent:async()=>({id:99,windowId:1}),get:async id=>{if(!tabs[id])throw new Error('no tab');return {...tabs[id]}},onUpdated:tabUpdated}};
 eval(fs.readFileSync(process.argv[2],'utf8'));
 assert.equal(await chrome.tabs.getCurrent(),undefined);
@@ -29,4 +30,18 @@ assert.equal(sent.at(-1).data.title,'Cloudflare SSL');
 const n=sent.length; setFollowed({1:6,2:7}); await tick(); assert.equal(sent.length,n);
 // followed tab closed -> back to anchor
 setFollowed({2:7}); await tick(); assert.equal(sent.at(-1).data.tabId,5);
+// tool calls carry the panel's window; other messages don't
+await chrome.runtime.sendMessage({type:'CIC_IFRAME_TOOL_CALL',panelTabId:5});
+await chrome.runtime.sendMessage({type:'STOP_AGENT'});
+await chrome.runtime.sendMessage({type:'CIC_IFRAME_BRIDGE_INIT',panelTabId:5});
+assert.deepEqual(sentToWorker,[{type:'CIC_IFRAME_TOOL_CALL',panelTabId:5,__shimWindowId:1},{type:'STOP_AGENT'},{type:'CIC_IFRAME_BRIDGE_INIT',panelTabId:5,__shimWindowId:1}]);
+// split view: the other visible tab goes in the title, with its id
+setFollowed({1:6}); await tick();
+for(const f of storageChanged.ls)f({__shimSplitTabs:{newValue:{1:[8]}}},'session'); await tick();
+assert.equal(sent.at(-1).data.tabId,6);
+assert.equal(sent.at(-1).data.title,'Cloudflare SSL [split view: also on screen and in your tab group, so you can read and use it: tab 8 "MBL TV" (https://youtube.com/@TVdoMBL)]');
+tabs[8].title='MBL Live'; for(const f of tabUpdated.ls) f(8,{title:'MBL Live'}); await tick();
+assert.match(sent.at(-1).data.title,/tab 8 "MBL Live"/);
+for(const f of storageChanged.ls)f({__shimSplitTabs:{newValue:{}}},'session'); await tick();
+assert.equal(sent.at(-1).data.title,'Cloudflare SSL');
 port1.close(); console.log('ALL PASS');
