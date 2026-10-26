@@ -2,15 +2,15 @@
 // tab from a native side panel (sender without a tab).
 import fs from 'fs'; import assert from 'assert';
 const mkEvent=()=>{const ls=new Set();return{ls,addListener(f){ls.add(f)},removeListener(f){ls.delete(f)},hasListener(f){return ls.has(f)}}};
-const onMessage=mkEvent(), onActivated=mkEvent();
+const onMessage=mkEvent(), onActivated=mkEvent(), onConnect=mkEvent(); const ungrouped=[];
 const nativeCalls=[]; let sessionStore={}; const visible=new Set(); const windowTabs={};
 globalThis.__shimMode='crest';
 globalThis.chrome={storage:{session:{get:async()=>({}),set:async o=>Object.assign(sessionStore,structuredClone(o))}},
-  runtime:{id:'EXT',getURL:p=>'chrome-extension://EXT/'+p,onMessage,onMessageExternal:mkEvent(),onConnect:mkEvent()},
+  runtime:{id:'EXT',getURL:p=>'chrome-extension://EXT/'+p,onMessage,onMessageExternal:mkEvent(),onConnect},
   sidePanel:{setOptions:async o=>nativeCalls.push(['setOptions',o]),open:async o=>nativeCalls.push(['open',o])},
   windows:{WINDOW_ID_NONE:-1,onFocusChanged:mkEvent(),get:async id=>({id,width:3500})},
   scripting:{executeScript:async({target})=>[{result:visible.has(target.tabId)?'visible':'hidden'}]},
-  tabs:{get:async id=>({id,url:'https://site'+id+'.com'}),query:async({windowId})=>windowTabs[windowId]??[],onActivated,onRemoved:mkEvent()}};
+  tabs:{get:async id=>({id,url:'https://site'+id+'.com'}),query:async({windowId})=>windowTabs[windowId]??[],onActivated,onRemoved:mkEvent(),ungroup:async ids=>ungrouped.push(...ids)}};
 eval(fs.readFileSync(process.argv[2],'utf8'));
 
 // the extension's per-tab calls become one global panel with a fixed path
@@ -66,4 +66,27 @@ windowTabs[1][0].width=1588; visible.add(4);
 for (const f of chrome.windows.onFocusChanged.ls) f(1);
 await new Promise(r=>setTimeout(r,5));
 assert.deepEqual(sessionStore.__shimSplitTabs,{1:[4]});
+
+// --- undo when Claude stops / the panel closes ---
+const seen=[]; chrome.runtime.onMessage.addListener(m=>{if(m.type==='CIC_IFRAME_AGENT_STATE')seen.push(m.panelTabId)});
+// a fresh panel (anchor 5, group 55) whose actions went to tab 6
+send({type:'CIC_IFRAME_TOOL_CALL',panelTabId:5,tabGroupId:55,__shimWindowId:1});
+assert.equal(got.panelTabId,6);
+// the panel says Claude stopped (for its own tab): tab 6 gets the same stop
+seen.length=0;
+send({type:'CIC_IFRAME_AGENT_STATE',running:false,panelTabId:5});
+assert.deepEqual(seen.sort(),[5,6,8]); // 8 got actions from window 2 earlier
+// panel closes: stop again, and the tabs we added leave the group (not the anchor)
+const portMsg=mkEvent(), portGone=mkEvent();
+const port={name:'cic-panel',sender:{id:'EXT',url:'chrome-extension://EXT/sidepanel.html?tabId=5'},onMessage:portMsg,onDisconnect:portGone,postMessage(){},disconnect(){}};
+for (const f of onConnect.ls) f(port);
+for (const f of portMsg.ls) f({panelTabId:5});
+seen.length=0; ungrouped.length=0;
+for (const f of portGone.ls) f();
+assert.deepEqual(seen.sort(),[6,8]);
+assert.ok(ungrouped.includes(6) && ungrouped.includes(4) && !ungrouped.includes(5));
+// after closing, switching tabs no longer adds them to that group
+joined.length=0;
+for (const f of onActivated.ls) await f({tabId:4,windowId:1});
+assert.ok(!joined.some(([,g])=>g===55));
 console.log('ALL PASS');

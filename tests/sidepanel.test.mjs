@@ -7,16 +7,16 @@ globalThis.chrome={storage:{session:{get:async()=>({}),set:async()=>{}}},runtime
     created:[],updated:[],onActivated:mkEvent(),onRemoved:mkEvent(),create:async o=>{const t={id:99,windowId:o.windowId,index:o.index,url:o.url};chrome.tabs.created.push(o);chrome.tabs.all.push(t);return t},update:async(id,o)=>{chrome.tabs.updated.push(id)}}};
 eval(fs.readFileSync(process.argv[2],'utf8'));
 const qi=e=>e.tab===undefined&&e.id==='EXT';
-let got; const cb=(m,s)=>{got=qi(s)}; chrome.runtime.onMessage.addListener(cb);
+const baseListeners=onMessage.ls.size; let got; const cb=(m,s)=>{got=qi(s)}; chrome.runtime.onMessage.addListener(cb);
 const fire=s=>[...onMessage.ls].forEach(f=>f({},s,()=>{}));
 fire({id:'EXT',url:'chrome-extension://EXT/sidepanel.html?tabId=5',tab:{id:9,url:'chrome-extension://EXT/sidepanel.html?tabId=5'}}); assert.equal(got,true);
 fire({id:'EXT',url:'chrome-extension://EXT/options.html',tab:{id:9,url:'chrome-extension://EXT/options.html'}}); assert.equal(got,false);
 fire({url:'https://evil.com/sidepanel.html',tab:{id:9,url:'https://evil.com/sidepanel.html'}}); assert.equal(got,false);
-assert(chrome.runtime.onMessage.hasListener(cb)); chrome.runtime.onMessage.removeListener(cb); assert.equal(onMessage.ls.size,0);
+assert(chrome.runtime.onMessage.hasListener(cb)); chrome.runtime.onMessage.removeListener(cb); assert.equal(onMessage.ls.size,baseListeners);
 // frozen port -> proxy fallback
 let port; chrome.runtime.onConnect.addListener(p=>{port=p});
 const real=Object.freeze({name:'cic-panel',sender:{id:'EXT',url:'chrome-extension://EXT/sidepanel.html?tabId=5',tab:{id:1,url:'chrome-extension://EXT/sidepanel.html?tabId=5'}},postMessage(x){return this===real}});
-[...onConnect.ls][0](real); assert(qi(port.sender)); assert.equal(port.postMessage(1),true); assert.equal(port.name,'cic-panel');
+for (const f of onConnect.ls) f(real); assert(qi(port.sender)); assert.equal(port.postMessage(1),true); assert.equal(port.name,'cic-panel');
 assert.equal(typeof chrome.sidePanel.setOptions,'function');
 let ext; chrome.runtime.onMessageExternal.addListener((m,s)=>{ext=s});
 const fireExt=s=>[...onMessageExternal.ls].forEach(f=>f({type:'get_sidepanel_host_info'},s,()=>{}));

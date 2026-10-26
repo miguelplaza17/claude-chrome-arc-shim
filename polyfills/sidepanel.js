@@ -95,15 +95,17 @@
     const { tab, ...rest } = sender;
     return rest;
   };
-  const wrapEvent = (event, wrap) => {
+  const wrapEvent = (event, wrap, registry) => {
     const wrapped = new WeakMap();
     const { addListener, removeListener, hasListener } = event;
     const patchFn = (name, fn) => Object.defineProperty(event, name, { value: fn, writable: true, configurable: true });
     patchFn("addListener", function (cb, ...rest) {
       if (!wrapped.has(cb)) wrapped.set(cb, wrap(cb));
+      registry?.add(cb);
       return addListener.call(this, wrapped.get(cb), ...rest);
     });
     patchFn("removeListener", function (cb) {
+      registry?.delete(cb);
       return removeListener.call(this, wrapped.get(cb) ?? cb);
     });
     patchFn("hasListener", function (cb) {
@@ -202,9 +204,37 @@
     const groupId = groups[windowId];
     if (groupId == null) return;
     for (const tabId of [followed[windowId], ...(split[windowId] ?? [])]) {
-      if (tabId != null) globalThis.__arcJoinTabGroup?.(tabId, groupId);
+      if (tabId != null) join(tabId, groupId);
     }
   }
+
+  // What the shim did on a panel's behalf, so it can be undone when Claude
+  // stops or the panel closes. The extension clears its "Claude is working"
+  // glow for the panel's own tab only, and doesn't know about the tabs we
+  // added to its group.
+  const STATE_KEY = "__shimPanelState";
+  let state = { joined: {}, redirected: {}, anchorGroup: {} }; // groupId -> [tabId], anchor -> [tabId], anchor -> groupId
+  chrome.storage.session
+    .get(STATE_KEY)
+    .then((r) => r[STATE_KEY] && (state = r[STATE_KEY]))
+    .catch(() => {});
+  const saveState = () => chrome.storage.session.set({ [STATE_KEY]: state }).catch(() => {});
+  const addTo = (map, key, tabId) => {
+    const list = (map[key] ??= []);
+    if (list.includes(tabId)) return false;
+    list.push(tabId);
+    return true;
+  };
+  function join(tabId, groupId) {
+    if (!globalThis.__arcJoinTabGroup?.(tabId, groupId)) return false;
+    if (addTo(state.joined, groupId, tabId)) saveState();
+    return true;
+  }
+  const rememberAnchor = (anchor, groupId) => {
+    if (!Number.isInteger(anchor) || !Number.isInteger(groupId) || state.anchorGroup[anchor] === groupId) return;
+    state.anchorGroup[anchor] = groupId;
+    saveState();
+  };
 
   const PANEL_MESSAGES = ["CIC_IFRAME_TOOL_CALL", "CIC_IFRAME_BRIDGE_INIT"];
   const fromPanel = (message, sender) =>
@@ -219,12 +249,14 @@
     if (clean.type !== "CIC_IFRAME_TOOL_CALL") return clean;
     const windowId = panelWindow(message, sender);
     rememberGroup(windowId, clean.tabGroupId);
+    rememberAnchor(clean.panelTabId, clean.tabGroupId);
     // Tabs beside it in a split view join the group too, so Claude can act on
     // them when it names them; unnamed actions go to the followed tab.
-    for (const tabId of split[windowId] ?? []) globalThis.__arcJoinTabGroup?.(tabId, clean.tabGroupId);
+    for (const tabId of split[windowId] ?? []) join(tabId, clean.tabGroupId);
     const target = followed[windowId];
     if (target == null || target === clean.panelTabId) return clean;
-    if (!globalThis.__arcJoinTabGroup?.(target, clean.tabGroupId)) return clean;
+    if (!join(target, clean.tabGroupId)) return clean;
+    if (addTo(state.redirected, clean.panelTabId, target)) saveState();
     return { ...clean, panelTabId: target };
   };
   // The bridge-init reply carries the panel's new group.
@@ -232,14 +264,63 @@
     if (!fromPanel(message, sender) || message.type !== "CIC_IFRAME_BRIDGE_INIT") return sendResponse;
     const windowId = panelWindow(message, sender);
     return (reply) => {
-      if (reply?.ok) rememberGroup(windowId, reply.tabGroupId);
+      if (reply?.ok) {
+        rememberGroup(windowId, reply.tabGroupId);
+        rememberAnchor(message.panelTabId, reply.tabGroupId);
+      }
       return sendResponse(reply);
     };
   };
 
   const withPanelSender = (cb) => (message, sender, sendResponse) =>
     cb(retarget(message, sender), asPanel(sender), watchReply(message, sender, sendResponse));
-  wrapEvent(chrome.runtime.onMessage, withPanelSender);
+
+  // Undo for a panel (identified by its own tab, the "anchor"): tell the
+  // extension Claude stopped on every tab we redirected its actions to, the
+  // same message the panel sends for its own tab; and, when the panel closes,
+  // take the tabs we added out of its group.
+  const messageListeners = new Set();
+  const panelSender = { id: chrome.runtime.id, url: panelUrl };
+  const stopRedirected = (anchor) => {
+    for (const tabId of state.redirected[anchor] ?? []) {
+      const stop = { type: "CIC_IFRAME_AGENT_STATE", running: false, panelTabId: tabId };
+      for (const cb of messageListeners) {
+        try {
+          cb(stop, panelSender, () => {});
+        } catch {}
+      }
+    }
+  };
+  const releasePanel = (anchor) => {
+    stopRedirected(anchor);
+    const groupId = state.anchorGroup[anchor];
+    const added = (state.joined[groupId] ?? []).filter((id) => id !== anchor);
+    if (added.length) chrome.tabs.ungroup(added).catch(() => {});
+    for (const [windowId, id] of Object.entries(groups)) if (id === groupId) delete groups[windowId];
+    chrome.storage.session.set({ [GROUP_KEY]: groups }).catch(() => {});
+    delete state.joined[groupId];
+    delete state.redirected[anchor];
+    delete state.anchorGroup[anchor];
+    saveState();
+  };
+  // These listeners are added before the wrapping below, so they see the
+  // panel's messages as sent.
+  chrome.runtime.onMessage.addListener((message, sender) => {
+    if (message?.type === "CIC_IFRAME_AGENT_STATE" && message.running === false && isPanel(sender?.url)) {
+      stopRedirected(message.panelTabId);
+    }
+  });
+  chrome.runtime.onConnect.addListener((port) => {
+    if (port.name !== "cic-panel" || port.sender?.id !== chrome.runtime.id || !isPanel(port.sender.url)) return;
+    if (!port.onMessage || !port.onDisconnect) return;
+    let anchor;
+    port.onMessage.addListener((msg) => {
+      if (anchor === undefined && Number.isInteger(msg?.panelTabId)) anchor = msg.panelTabId;
+    });
+    port.onDisconnect.addListener(() => anchor !== undefined && releasePanel(anchor));
+  });
+
+  wrapEvent(chrome.runtime.onMessage, withPanelSender, messageListeners);
   wrapEvent(chrome.runtime.onMessageExternal, withPanelSender);
   wrapEvent(chrome.runtime.onConnect, (cb) => (port) => {
     const sender = asPanel(port.sender);
